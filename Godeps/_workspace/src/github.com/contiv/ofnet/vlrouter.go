@@ -104,6 +104,8 @@ func (self *Vlrouter) SwitchDisconnected(sw *ofctrl.OFSwitch) {
 	// FIXME
 }
 
+func (self *Vlrouter) MPReply(sw *ofctrl.OFSwitch, reply *openflow13.MultipartReply) {
+}
 // Handle incoming packet
 func (self *Vlrouter) PacketRcvd(sw *ofctrl.OFSwitch, pkt *ofctrl.PacketIn) {
 	switch pkt.Data.Ethertype {
@@ -626,16 +628,21 @@ func (self *Vlrouter) RemoveUplink(portNo uint32) error {
 	return nil
 }
 
+// GetEPStats fetches ep stats
+func (self *Vlrouter) GetEPStats(endpoint *OfnetEndpoint) (*OfnetEPStats, error) {
+        return nil, nil
+}
 // AddSvcSpec adds a service spec to proxy
 func (self *Vlrouter) AddSvcSpec(svcName string, spec *ServiceSpec) error {
-	return nil
+        return nil
 }
 
 // DelSvcSpec removes a service spec from proxy
 func (self *Vlrouter) DelSvcSpec(svcName string, spec *ServiceSpec) error {
-	return nil
+        return nil
 }
 
 // SvcProviderUpdate Service Proxy Back End update
 func (self *Vlrouter) SvcProviderUpdate(svcName string, providers []string) {
 }
+

@@ -106,6 +106,12 @@ func (self *Vrouter) SwitchDisconnected(sw *ofctrl.OFSwitch) {
 	// FIXME: ??
 }
 
+func (self *Vrouter) MPReply(sw *ofctrl.OFSwitch, reply *openflow13.MultipartReply) {
+	if reply.Type == openflow13.MultipartType_Flow {
+		self.svcProxy.FlowStats(reply)
+	}
+}
+
 // Handle incoming packet
 func (self *Vrouter) PacketRcvd(sw *ofctrl.OFSwitch, pkt *ofctrl.PacketIn) {
 	if pkt.TableId == SRV_PROXY_SNAT_TBL_ID || pkt.TableId == SRV_PROXY_DNAT_TBL_ID {
@@ -427,6 +433,11 @@ func (vr *Vrouter) DelSvcSpec(svcName string, spec *ServiceSpec) error {
 // SvcProviderUpdate Service Proxy Back End update
 func (vr *Vrouter) SvcProviderUpdate(svcName string, providers []string) {
 	vr.svcProxy.ProviderUpdate(svcName, providers)
+}
+
+// GetEPStats fetches ep stats
+func (vr *Vrouter)GetEPStats(endpoint *OfnetEndpoint) (*OfnetEPStats, error) {
+        return vr.svcProxy.GetEPStats(endpoint)
 }
 
 // initialize Fgraph on the switch

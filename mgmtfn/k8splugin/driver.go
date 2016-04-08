@@ -313,7 +313,7 @@ func getEPSpec(pInfo *cniapi.CNIPodAttr) (*epSpec, error) {
 	resp.Tenant = tenant
 	resp.Network = netw
 	resp.Group = epg
-	resp.EndpointID = pInfo.InfraContainerID
+	resp.EndpointID = pInfo.K8sNameSpace + "::" + pInfo.Name
 
 	return &resp, nil
 }

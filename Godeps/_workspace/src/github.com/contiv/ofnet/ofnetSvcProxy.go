@@ -19,6 +19,7 @@ import (
 	"errors"
 	"strconv"
 	"net"
+	"time"
 	"github.com/shaleman/libOpenflow/protocol"
 	"github.com/shaleman/libOpenflow/openflow13"
 	"sync"
@@ -76,6 +77,11 @@ type proxyOper struct {
 	natFlows map[string]*ofctrl.Flow // epIP.[in|out] as key
 }
 
+type flowHdl struct {
+	svcIP string
+	flow *ofctrl.Flow
+}
+
 // ServiceProxy is an instance of a service proxy
 type ServiceProxy struct {
 	ofSwitch    *ofctrl.OFSwitch        // openflow switch we are talking to
@@ -86,6 +92,9 @@ type ServiceProxy struct {
 	catalogue   svcCatalogue		// Services and providers added to the proxy
 	oMutex sync.Mutex		// mutex between management and datapath
 	operState   map[string]*proxyOper	// Operational state info, with service IP as key
+	epStats     map[string]*OfnetEPStats
+	flowMap     map[uint64]flowHdl  // flowId to Info map
+	statsOn     bool
 }
 
 func getIPProto(prot string) uint8 {
@@ -145,7 +154,7 @@ func getNATKey(epIP, natT string, p *PortSpec) string {
 // addNATFlow sets up a NAT flow
 // natT must be "Src" or "Dst"
 func (svcOp *proxyOper)addNATFlow(this, next *ofctrl.Table, p *PortSpec,
-				 ipSa, ipDa, ipNew *net.IP, natT string) {
+				 ipSa, ipDa, ipNew *net.IP, natT string) (*ofctrl.Flow, error){
 	match := ofctrl.FlowMatch{
                         Priority: FLOW_MATCH_PRIORITY,
                         Ethertype: 0x0800,
@@ -172,7 +181,7 @@ func (svcOp *proxyOper)addNATFlow(this, next *ofctrl.Table, p *PortSpec,
 
 	if err != nil {
 		log.Errorf("Proxy addNATFlow failed")
-		return
+		return nil, errors.New("Proxy addNATFlow failed")
 	}
 
 	l4field := p.Protocol + natT  // evaluates to TCP[Src,Dst] or UDP[Src,Dst]
@@ -193,14 +202,16 @@ func (svcOp *proxyOper)addNATFlow(this, next *ofctrl.Table, p *PortSpec,
 	}
 	svcOp.natFlows[key] = natFlow
 	log.Infof("Added NAT %s to %s", key, ipNew.String())
+	return natFlow, nil
 }
 
-func (svcOp *proxyOper)delNATFlow(epIP, natT string, p *PortSpec) {
+func (svcOp *proxyOper)delNATFlow(proxy *ServiceProxy, epIP, natT string, p *PortSpec) {
 	key := getNATKey(epIP, natT, p)
 
 	flow, found := svcOp.natFlows[key]
 	if found {
 		log.Infof("Deleting NAT %s", key)
+		delete(proxy.flowMap, flow.FlowId)
 		flow.Delete()
 		delete(svcOp.natFlows, key)
 	} else {
@@ -383,6 +394,18 @@ func (proxy *ServiceProxy)DelSvcSpec(svcName string, spec *ServiceSpec) error {
 	return nil
 }
 
+// GetEPStats fetches ep stats
+func (proxy *ServiceProxy)GetEPStats(endpoint *OfnetEndpoint) (*OfnetEPStats, error) {
+	epIP := endpoint.IpAddr.String()
+	stats, found := proxy.epStats[epIP]
+	if found {
+		return stats, nil
+	}
+
+	return nil, errors.New("Not stats found for this EP")
+}
+
+
 // addProvider adds the given provider to operational State
 func (proxy *ServiceProxy)addProvider(svcIP, provIP string) error {
 	oper := proxy.operState
@@ -412,8 +435,8 @@ func (proxy *ServiceProxy)delProvider(svcIP, provIP string) error {
 	// Remove flows NAT'ed to this provider
 	for epIP, _ := range operEntry.provHdl[provIP].clientEPs {
 		for _, p := range operEntry.ports {
-			operEntry.delNATFlow(epIP, "Dst", &p)
-			operEntry.delNATFlow(epIP, "Src", &p)
+			operEntry.delNATFlow(proxy, epIP, "Dst", &p)
+			operEntry.delNATFlow(proxy, epIP, "Src", &p)
 		}
 	}
 
@@ -500,6 +523,8 @@ func NewServiceProxy() *ServiceProxy {
 	svcProxy.catalogue.svcMap = make(map[string]ServiceSpec)
 	svcProxy.catalogue.provMap = make(map[string]Providers)
 	svcProxy.operState = make(map[string]*proxyOper)
+	svcProxy.flowMap = make(map[uint64]flowHdl)
+	svcProxy.statsOn = false
 
 	return svcProxy
 }
@@ -532,8 +557,8 @@ func (proxy *ServiceProxy) DelEndpoint(endpoint *OfnetEndpoint) {
 			if found {
 				provIP := flow.Match.IpDa.String()
 				// delete both flows and remove the client
-				operEntry.delNATFlow(epIP, "Dst", &p)
-				operEntry.delNATFlow(epIP, "Src", &p)
+				operEntry.delNATFlow(proxy, epIP, "Dst", &p)
+				operEntry.delNATFlow(proxy, epIP, "Src", &p)
 				hdl, ok := operEntry.provHdl[provIP]
 				if ok {
 					delete(hdl.clientEPs, epIP)
@@ -560,6 +585,104 @@ func getInPort(pkt *ofctrl.PacketIn) uint32 {
 	}
 
 	return openflow13.P_ANY
+}
+
+func (proxy *ServiceProxy) updateSNATStats(fs *openflow13.FlowStats) {
+	// find svcIP
+	flowInfo, found := proxy.flowMap[fs.Cookie]	
+	if !found {
+		return	// Flow is probably deleted
+	}
+	
+	svcIP := flowInfo.svcIP
+	fm := flowInfo.flow.Match
+	provIP := fm.IpSa.String()
+	epIP := fm.IpDa.String()
+	entry, found := proxy.epStats[epIP]
+	if !found {
+		entry = &OfnetEPStats{}
+		entry.SvcStats = make(map[string]OfnetSvcStats)
+		proxy.epStats[epIP] = entry
+	}
+
+	_, found = entry.SvcStats[svcIP]
+	if !found {
+		entry.SvcStats[svcIP] = OfnetSvcStats{}
+	}
+
+	stats := entry.SvcStats[svcIP]
+	if fm.IpProto == ofctrl.IP_PROTO_TCP {
+		stats.Protocol = "TCP"
+		stats.ProvPort = strconv.Itoa(int(fm.TcpSrcPort))
+	} else {
+		stats.Protocol = "UDP"
+		stats.ProvPort = strconv.Itoa(int(fm.UdpSrcPort))
+	}
+
+	stats.ProviderIP = provIP
+	stats.Stats.PacketsIn = fs.PacketCount
+	stats.Stats.BytesIn = fs.ByteCount
+	entry.SvcStats[svcIP] = stats
+}
+
+func (proxy *ServiceProxy) updateDNATStats(fs *openflow13.FlowStats) {
+	flowInfo, found := proxy.flowMap[fs.Cookie]	
+	if !found {
+		return	// Flow is probably deleted
+	}
+
+	svcIP := flowInfo.svcIP
+	fm := flowInfo.flow.Match
+	if fm.TcpSrcPort == 0 && fm.TcpDstPort == 0 &&
+		fm.UdpSrcPort == 0 && fm.UdpSrcPort == 0 {
+		return	// watch flow
+	}
+	epIP := fm.IpSa.String()
+	entry, found := proxy.epStats[epIP]
+	if !found {
+		entry = &OfnetEPStats{}
+		entry.SvcStats = make(map[string]OfnetSvcStats)
+		proxy.epStats[epIP] = entry
+	}
+
+	_, found = entry.SvcStats[svcIP]
+	if !found {
+		entry.SvcStats[svcIP] = OfnetSvcStats{}
+	}
+	stats := entry.SvcStats[svcIP]
+
+	if fm.IpProto == ofctrl.IP_PROTO_TCP {
+		stats.Protocol = "TCP"
+		stats.SvcPort = strconv.Itoa(int(fm.TcpDstPort))
+	} else {
+		stats.Protocol = "UDP"
+		stats.SvcPort = strconv.Itoa(int(fm.UdpDstPort))
+	}
+
+	stats.Stats.PacketsOut = fs.PacketCount
+	stats.Stats.BytesOut = fs.ByteCount
+	entry.SvcStats[svcIP] = stats
+}
+
+// FlowStats handles a stats response from the switch
+func (proxy *ServiceProxy) FlowStats(reply *openflow13.MultipartReply) {
+	if reply.Type != openflow13.MultipartType_Flow {
+		log.Warnf("Unexpected MP Reply type: %v", reply.Type)
+		return
+	}
+
+	flowArr := reply.Body
+	for _, entry := range flowArr {
+		flowStats := entry.(*openflow13.FlowStats)
+		
+		if flowStats.TableId == SRV_PROXY_DNAT_TBL_ID {
+			proxy.updateDNATStats(flowStats)
+		}
+
+		if flowStats.TableId == SRV_PROXY_SNAT_TBL_ID {
+			proxy.updateSNATStats(flowStats)
+		}
+	}
 }
 
 // HandlePkt processes a received pkt from a matching table entry
@@ -601,15 +724,27 @@ func (proxy *ServiceProxy) HandlePkt(pkt *ofctrl.PacketIn) {
 	ipSrc := net.ParseIP(ip.NWSrc.String())
 	ipDst := net.ParseIP(ip.NWDst.String())
 
+	fInfo := flowHdl { svcIP: svcIP,
+			}
 	// setup nat rules in both directions for all ports of the service
 	for _, p := range operEntry.ports {
 		// set up outgoing NAT
-		operEntry.addNATFlow(proxy.dNATTable, proxy.dNATNext, &p,
+		f, err := operEntry.addNATFlow(proxy.dNATTable, proxy.dNATNext, &p,
 				&ipSrc, &ipDst, &provIP, spDNAT)
+		if err == nil {
+			fInfo.flow = f
+			proxy.flowMap[f.FlowId] = fInfo
+		} else {
+			continue
+		}
 
 		// set up incoming NAT
-		operEntry.addNATFlow(proxy.sNATTable, proxy.sNATNext, &p,
+		f, err = operEntry.addNATFlow(proxy.sNATTable, proxy.sNATNext, &p,
 				&provIP, &ipSrc, &ipDst, spSNAT)
+		if err == nil {
+			fInfo.flow = f
+			proxy.flowMap[f.FlowId] = fInfo
+		}
 	}
 
 	if pkt.Data.HWSrc.String() == "00:00:00:00:00:00" {
@@ -628,6 +763,40 @@ func (proxy *ServiceProxy) HandlePkt(pkt *ofctrl.PacketIn) {
 	// Send it out
 	proxy.ofSwitch.Send(pktOut)
 
+	if !proxy.statsOn {
+		proxy.statsOn = true
+		go proxy.pollStats()
+	}
+
+}
+
+func getMPReq() *openflow13.MultipartRequest {
+	mp := &openflow13.MultipartRequest{}
+	mp.Type = openflow13.MultipartType_Flow
+	mp.Header = openflow13.NewOfp13Header()
+	mp.Header.Type = openflow13.Type_MultiPartRequest
+	return mp
+}
+
+func (proxy *ServiceProxy) pollStats() {
+	for {
+		time.Sleep(9*time.Second)
+		//inject a stats request
+		dnatReq := openflow13.NewFlowStatsRequest()
+		dnatReq.TableId = SRV_PROXY_DNAT_TBL_ID
+		mp1 := getMPReq()
+		mp1.Body = dnatReq
+		proxy.ofSwitch.Send(mp1)
+		log.Infof("Sent DNAT stats req")
+		time.Sleep(1*time.Second)
+		//inject a stats request
+		snatReq := openflow13.NewFlowStatsRequest()
+		snatReq.TableId = SRV_PROXY_SNAT_TBL_ID
+		mp2 := getMPReq()
+		mp2.Body = snatReq
+		proxy.ofSwitch.Send(mp2)
+		log.Infof("Sent SNAT stats req")
+	}
 }
 
 // InitSNATTable initializes the sNAT table

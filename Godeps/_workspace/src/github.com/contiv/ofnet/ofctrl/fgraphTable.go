@@ -50,7 +50,7 @@ func (self *Table) NewFlow(match FlowMatch) (*Flow, error) {
 	flow.Table = self
 	flow.Match = match
 	flow.isInstalled = false
-	flow.flowId = globalFlowId // FIXME: need a better id allocation
+	flow.FlowId = globalFlowId // FIXME: need a better id allocation
 	globalFlowId += 1
 	flow.flowActions = make([]*FlowAction, 0)
 

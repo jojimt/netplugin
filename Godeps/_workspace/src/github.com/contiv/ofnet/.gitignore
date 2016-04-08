@@ -1,3 +1,4 @@
 # vagrant
 .vagrant
-cscope*
+cscope.*
+*_test.go

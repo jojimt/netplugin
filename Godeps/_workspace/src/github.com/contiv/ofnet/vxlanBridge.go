@@ -79,7 +79,6 @@ type Vlan struct {
 }
 
 const METADATA_RX_VTEP = 0x1
-const VXLAN_GARP_SUPPORTED = false
 
 // Create a new vxlan instance
 func NewVxlan(agent *OfnetAgent, rpcServ *rpc.Server) *Vxlan {
@@ -122,6 +121,9 @@ func (self *Vxlan) SwitchConnected(sw *ofctrl.OFSwitch) {
 // Handle switch disconnected notification
 func (self *Vxlan) SwitchDisconnected(sw *ofctrl.OFSwitch) {
 	// FIXME: ??
+}
+
+func (self *Vxlan) MPReply(sw *ofctrl.OFSwitch, reply *openflow13.MultipartReply) {
 }
 
 // Handle incoming packet
@@ -221,13 +223,6 @@ func (self *Vxlan) AddLocalEndpoint(endpoint OfnetEndpoint) error {
 
 	// Save the flow in DB
 	self.macFlowDb[endpoint.MacAddrStr] = macFlow
-
-	// Send GARP
-	err = self.sendGARP(endpoint.IpAddr, macAddr, uint64(endpoint.Vni))
-	if err != nil {
-		log.Warnf("Error in sending GARP packet for (%s,%s) in vlan %d. Err: %+v",
-			endpoint.IpAddr.String(), endpoint.MacAddrStr, endpoint.Vlan, err)
-	}
 
 	return nil
 }
@@ -602,6 +597,11 @@ func (vx *Vxlan) DelSvcSpec(svcName string, spec *ServiceSpec) error {
 func (vx *Vxlan) SvcProviderUpdate(svcName string, providers []string) {
 }
 
+// GetEPStats fetches ep stats
+func (vx *Vxlan)GetEPStats(endpoint *OfnetEndpoint) (*OfnetEPStats, error) {
+        return nil, nil
+}
+
 // initialize Fgraph on the switch
 func (self *Vxlan) initFgraph() error {
 	sw := self.ofSwitch
@@ -688,12 +688,6 @@ func (self *Vxlan) processArp(pkt protocol.Ethernet, inPort uint32) {
 
 		switch arpIn.Operation {
 		case protocol.Type_Request:
-			// If it's a GARP packet, ignore processing
-			if arpIn.IPSrc.String() == arpIn.IPDst.String() {
-				log.Debugf("Ignoring GARP packet")
-				return
-			}
-
 			// Lookup the Source and Dest IP in the endpoint table
 			srcEp := self.agent.getEndpointByIp(arpIn.IPSrc)
 			dstEp := self.agent.getEndpointByIp(arpIn.IPDst)
@@ -802,30 +796,4 @@ func (self *Vxlan) processArp(pkt protocol.Ethernet, inPort uint32) {
 			self.ofSwitch.Send(pktOut)
 		}
 	}
-}
-
-// sendGARP sends GARP for the specified IP, MAC
-func (self *Vxlan) sendGARP(ip net.IP, mac net.HardwareAddr, vni uint64) error {
-
-	// NOTE: Enable this when EVPN support is added.
-	if !VXLAN_GARP_SUPPORTED {
-		return nil
-	}
-
-    pktOut := BuildGarpPkt(ip, mac, 0)
-
-	tunnelIdField := openflow13.NewTunnelIdField(vni)
-	setTunnelAction := openflow13.NewActionSetField(*tunnelIdField)
-
-	// Add set tunnel action to the instruction
-	pktOut.AddAction(setTunnelAction)
-
-	for _, vtepPort := range self.agent.vtepTable {
-		log.Debugf("Sending to Vtep port: %+v", *vtepPort)
-		pktOut.AddAction(openflow13.NewActionOutput(*vtepPort))
-	}
-
-	// Send it out
-	self.ofSwitch.Send(pktOut)
-	return nil
 }

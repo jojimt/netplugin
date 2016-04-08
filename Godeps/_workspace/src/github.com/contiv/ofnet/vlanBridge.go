@@ -35,6 +35,7 @@ type VlanBridge struct {
 	agent       *OfnetAgent      // Pointer back to ofnet agent that owns this
 	ofSwitch    *ofctrl.OFSwitch // openflow switch we are talking to
 	policyAgent *PolicyAgent     // Policy agent
+	svcProxy    *ServiceProxy    // Service proxy
 
 	// Fgraph tables
 	inputTable *ofctrl.Table // Packet lookup starts here
@@ -56,6 +57,7 @@ func NewVlanBridge(agent *OfnetAgent, rpcServ *rpc.Server) *VlanBridge {
 	vlan.portVlanFlowDb = make(map[uint32]*ofctrl.Flow)
 	vlan.uplinkDb = make(map[uint32]uint32)
 
+	vlan.svcProxy = NewServiceProxy()
 	// Create policy agent
 	vlan.policyAgent = NewPolicyAgent(agent, rpcServ)
 
@@ -73,6 +75,7 @@ func (vl *VlanBridge) SwitchConnected(sw *ofctrl.OFSwitch) {
 	// Keep a reference to the switch
 	vl.ofSwitch = sw
 
+	vl.svcProxy.SwitchConnected(sw)
 	// Tell the policy agent about the switch
 	vl.policyAgent.SwitchConnected(sw)
 
@@ -87,8 +90,16 @@ func (vl *VlanBridge) SwitchDisconnected(sw *ofctrl.OFSwitch) {
 	// FIXME: ??
 }
 
+func (vl *VlanBridge) MPReply(sw *ofctrl.OFSwitch, reply *openflow13.MultipartReply) {
+}
+
 // PacketRcvd Handle incoming packet
 func (vl *VlanBridge) PacketRcvd(sw *ofctrl.OFSwitch, pkt *ofctrl.PacketIn) {
+	if pkt.TableId == SRV_PROXY_SNAT_TBL_ID || pkt.TableId == SRV_PROXY_DNAT_TBL_ID {
+		// these are destined to service proxy
+		vl.svcProxy.HandlePkt(pkt)
+	}
+
 	switch pkt.Data.Ethertype {
 	case 0x0806:
 		if (pkt.Match.Type == openflow13.MatchType_OXM) &&
@@ -128,8 +139,9 @@ func (vl *VlanBridge) AddLocalEndpoint(endpoint OfnetEndpoint) error {
 
 	// Set the vlan and install it
 	// FIXME: portVlanFlow.SetVlan(endpoint.Vlan)
-	dstGrpTbl := vl.ofSwitch.GetTable(DST_GRP_TBL_ID)
-	err = portVlanFlow.Next(dstGrpTbl)
+	// Point it to dnat table
+	dNATTbl := vl.ofSwitch.GetTable(SRV_PROXY_DNAT_TBL_ID)
+	err = portVlanFlow.Next(dNATTbl)
 	if err != nil {
 		log.Errorf("Error installing portvlan entry. Err: %v", err)
 		return err
@@ -143,14 +155,6 @@ func (vl *VlanBridge) AddLocalEndpoint(endpoint OfnetEndpoint) error {
 	if err != nil {
 		log.Errorf("Error adding endpoint to policy agent{%+v}. Err: %v", endpoint, err)
 		return err
-	}
-
-	// Send GARP
-	mac, _ := net.ParseMAC(endpoint.MacAddrStr)
-	err = vl.sendGARP(endpoint.IpAddr, mac, endpoint.Vlan)
-	if err != nil {
-		log.Warnf("Error in sending GARP packet for (%s,%s) in vlan %d. Err: %+v",
-			endpoint.IpAddr.String(), endpoint.MacAddrStr, endpoint.Vlan, err)
 	}
 
 	return nil
@@ -167,6 +171,7 @@ func (vl *VlanBridge) RemoveLocalEndpoint(endpoint OfnetEndpoint) error {
 		}
 	}
 
+	vl.svcProxy.DelEndpoint(&endpoint)
 	// Remove the endpoint from policy tables
 	err := vl.policyAgent.DelEndpoint(&endpoint)
 	if err != nil {
@@ -240,7 +245,8 @@ func (vl *VlanBridge) AddUplink(portNo uint32) error {
 	}
 
 	// Packets coming from uplink go thru normal lookup(bypass policy)
-	err = portVlanFlow.Next(vl.ofSwitch.NormalLookup())
+	sNATTbl := vl.ofSwitch.GetTable(SRV_PROXY_SNAT_TBL_ID)
+	err = portVlanFlow.Next(sNATTbl)
 	if err != nil {
 		log.Errorf("Error installing portvlan entry. Err: %v", err)
 		return err
@@ -261,16 +267,22 @@ func (vl *VlanBridge) RemoveUplink(portNo uint32) error {
 
 // AddSvcSpec adds a service spec to proxy
 func (vl *VlanBridge) AddSvcSpec(svcName string, spec *ServiceSpec) error {
-	return nil
+	return vl.svcProxy.AddSvcSpec(svcName, spec)
 }
 
 // DelSvcSpec removes a service spec from proxy
 func (vl *VlanBridge) DelSvcSpec(svcName string, spec *ServiceSpec) error {
-	return nil
+	return vl.svcProxy.DelSvcSpec(svcName, spec)
 }
 
 // SvcProviderUpdate Service Proxy Back End update
 func (vl *VlanBridge) SvcProviderUpdate(svcName string, providers []string) {
+	vl.svcProxy.ProviderUpdate(svcName, providers)
+}
+
+// GetEPStats fetches ep stats
+func (vl *VlanBridge)GetEPStats(endpoint *OfnetEndpoint) (*OfnetEPStats, error) {
+	return vl.svcProxy.GetEPStats(endpoint)
 }
 
 // initialize Fgraph on the switch
@@ -284,12 +296,19 @@ func (vl *VlanBridge) initFgraph() error {
 	vl.vlanTable, _ = sw.NewTable(VLAN_TBL_ID)
 	vl.nmlTable, _ = sw.NewTable(MAC_DEST_TBL_ID)
 
+	// setup SNAT table
+	// Matches in SNAT table (i.e. incoming) go to mac dest
+	vl.svcProxy.InitSNATTable(MAC_DEST_TBL_ID)
+
 	// Init policy tables
-	err := vl.policyAgent.InitTables(MAC_DEST_TBL_ID)
+	err := vl.policyAgent.InitTables(SRV_PROXY_SNAT_TBL_ID)
 	if err != nil {
 		log.Fatalf("Error installing policy table. Err: %v", err)
 		return err
 	}
+
+	// Matches in DNAT go to Policy
+	vl.svcProxy.InitDNATTable(DST_GRP_TBL_ID)
 
 	// Send all packets to vlan lookup
 	validPktFlow, _ := vl.inputTable.NewFlow(ofctrl.FlowMatch{
@@ -341,12 +360,6 @@ func (vl *VlanBridge) processArp(pkt protocol.Ethernet, inPort uint32) {
 
 		switch arpIn.Operation {
 		case protocol.Type_Request:
-			// If it's a GARP packet, ignore processing
-			if arpIn.IPSrc.String() == arpIn.IPDst.String() {
-				log.Debugf("Ignoring GARP packet")
-				return
-			}
-
 			// Lookup the Source and Dest IP in the endpoint table
 			srcEp := vl.agent.getEndpointByIp(arpIn.IPSrc)
 			dstEp := vl.agent.getEndpointByIp(arpIn.IPDst)
@@ -449,22 +462,4 @@ func (vl *VlanBridge) processArp(pkt protocol.Ethernet, inPort uint32) {
 			vl.ofSwitch.Send(pktOut)
 		}
 	}
-}
-
-// sendGARP sends GARP for the specified IP, MAC
-func (vl *VlanBridge) sendGARP(ip net.IP, mac net.HardwareAddr, vlanID uint16) error {
-    pktOut := BuildGarpPkt(ip, mac, vlanID)
-
-	for _, portNo := range vl.uplinkDb {
-		log.Debugf("Sending to uplink: %+v", portNo)
-		pktOut.AddAction(openflow13.NewActionOutput(portNo))
-
-		// NOTE: Sending it on only one uplink to avoid loops
-		// Once MAC pinning mode is supported, this logic has to change
-		break
-	}
-
-	// Send it out
-	vl.ofSwitch.Send(pktOut)
-	return nil
 }
