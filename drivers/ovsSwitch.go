@@ -614,3 +614,17 @@ func (sw *OvsSwitch) DelSvcSpec(svcName string, spec *ofnet.ServiceSpec) error {
 func (sw *OvsSwitch) SvcProviderUpdate(svcName string, providers []string) {
 	sw.ofnetAgent.SvcProviderUpdate(svcName, providers)
 }
+
+// GetEPStats invokes ofnetAgent api
+func (sw *OvsSwitch) GetEPStats(ipAddr string) {
+	endpoint := ofnet.OfnetEndpoint{
+		IpAddr: net.ParseIP(ipAddr),
+	}
+	stats, err := sw.ofnetAgent.GetEPStats(&endpoint)
+
+	if err != nil {
+		log.Errorf("Error: %v", err)
+	} else {
+		log.Infof("stats: %+v", stats)
+	}
+}

@@ -120,3 +120,33 @@ func (c *NWClient) DelPod(podInfo interface{}) error {
 
 	return nil
 }
+
+// DelPod deletes a pod from contiv using the cni api
+func (c *NWClient) GetStats(podInfo interface{}) error {
+
+	buf, err := json.Marshal(podInfo)
+	if err != nil {
+		return err
+	}
+
+	body := bytes.NewBuffer(buf)
+	url := c.baseURL + cniapi.EPStatsURL
+	r, err := c.client.Post(url, "application/json", body)
+	if err != nil {
+		return err
+	}
+	defer r.Body.Close()
+
+	switch {
+	case r.StatusCode == int(404):
+		return fmt.Errorf("Page not found!")
+	case r.StatusCode == int(403):
+		return fmt.Errorf("Access denied!")
+	case r.StatusCode != int(200):
+		log.Errorf("GET Status '%s' status code %d \n", r.Status, r.StatusCode)
+		return fmt.Errorf("%s", r.Status)
+	}
+
+	log.Infof("Stats: %+v", r.Body)
+	return nil
+}

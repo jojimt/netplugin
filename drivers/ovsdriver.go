@@ -524,3 +524,10 @@ func (d *OvsDriver) SvcProviderUpdate(svcName string, providers []string) {
 		sw.SvcProviderUpdate(svcName, providers)
 	}
 }
+
+// GetEPStats invokes ofnetAgent api
+func (d *OvsDriver) GetEPStats(ipAddr string) {
+	for _, sw := range d.switchDb {
+		sw.GetEPStats(ipAddr)
+	}
+}

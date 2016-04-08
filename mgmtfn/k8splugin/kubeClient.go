@@ -209,6 +209,19 @@ func (c *APIClient) GetPodLabel(ns, name, label string) (string, error) {
 	return "", nil
 }
 
+// GetAllLabels gets all labels for the pod
+func (c *APIClient) GetAllLabels(ns, name string) (map[string]string, error) {
+	// If cache does not match, fetch
+	if c.podCache.nameSpace != ns || c.podCache.name != name {
+		err := c.fetchPodLabels(ns, name)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return c.podCache.labels, nil
+}
+
 // WatchServices watches the services object on the api server
 func (c *APIClient) WatchServices(respCh chan SvcWatchResp) {
 	ctx, _ := context.WithCancel(context.Background())
@@ -257,9 +270,9 @@ func (c *APIClient) WatchServices(respCh chan SvcWatchResp) {
 				continue
 			}
 
-			//if wss.Object.ObjectMeta.Namespace != "default" {
-			//	continue
-			//}
+			if wss.Object.ObjectMeta.Namespace != "default" {
+				continue
+			}
 			resp := SvcWatchResp{opcode: wss.Type}
 			resp.svcName = wss.Object.ObjectMeta.Name
 			sSpec := core.ServiceSpec{}
@@ -328,9 +341,9 @@ func (c *APIClient) WatchSvcEps(respCh chan EpWatchResp) {
 				respCh <- EpWatchResp{opcode: "WARN", errStr: fmt.Sprintf("unmarshal %v", err)}
 				continue
 			}
-			//if weps.Object.ObjectMeta.Namespace != "default" {
-			//	continue
-			//}
+			if weps.Object.ObjectMeta.Namespace != "default" {
+				continue
+			}
 
 			resp := EpWatchResp{opcode: weps.Type}
 			resp.svcName = weps.Object.ObjectMeta.Name

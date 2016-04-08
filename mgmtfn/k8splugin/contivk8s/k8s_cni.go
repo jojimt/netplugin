@@ -136,13 +136,20 @@ func mainfunc() {
 	log.Infof("==> Start New Log <==\n")
 	log.Infof("command: %s, cni_args: %s", cniCmd, os.Getenv("CNI_ARGS"))
 
+	nc := clients.NewNWClient()
+	if cniCmd == "STATS" {
+		pInfo.K8sNameSpace = "default"
+		pInfo.Name = os.Getenv("STATS_POD_NAME")
+		nc.GetStats(&pInfo)
+		return
+	}
+
 	// Collect information passed by CNI
 	err = getPodInfo(&pInfo)
 	if err != nil {
 		log.Fatalf("Error parsing environment. Err: %v", err)
 	}
 
-	nc := clients.NewNWClient()
 	if cniCmd == "ADD" {
 		addPodToContiv(nc, &pInfo)
 	} else if cniCmd == "DEL" {
