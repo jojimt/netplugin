@@ -68,6 +68,9 @@ type OfnetDatapath interface {
 	//Delete uplink port
 	RemoveUplink(portNo uint32) error
 
+	//Inject GARPs
+	InjectGARPs(epgID int)
+
 	// Add a service spec to proxy
 	AddSvcSpec(svcName string, spec *ServiceSpec) error
 
@@ -123,6 +126,8 @@ type OfnetEndpoint struct {
 	EndpointGroup     int       // Endpoint group identifier for policies.
 	IpAddr            net.IP    // IP address of the end point
 	IpMask            net.IP    // IP mask for the end point
+	Ipv6Addr          net.IP    // IPv6 address of the end point
+	Ipv6Mask          net.IP    // IPv6 mask for the end point
 	Vrf               string    // IP address namespace
 	MacAddrStr        string    // Mac address of the end point(in string format)
 	Vlan              uint16    // Vlan Id for the endpoint

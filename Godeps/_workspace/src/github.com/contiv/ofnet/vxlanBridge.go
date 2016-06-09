@@ -143,6 +143,10 @@ func (self *Vxlan) PacketRcvd(sw *ofctrl.OFSwitch, pkt *ofctrl.PacketIn) {
 	}
 }
 
+// InjectGARPs not implemented
+func (self *Vxlan) InjectGARPs(epgID int) {
+}
+
 // Add a local endpoint and install associated local route
 func (self *Vxlan) AddLocalEndpoint(endpoint OfnetEndpoint) error {
 	log.Infof("Adding localEndpoint: %+v", endpoint)
@@ -225,6 +229,15 @@ func (self *Vxlan) AddLocalEndpoint(endpoint OfnetEndpoint) error {
 		return err
 	}
 
+	// Install dst group entry for IPv6 endpoint
+	if endpoint.Ipv6Addr != nil {
+		err = self.policyAgent.AddIpv6Endpoint(&endpoint)
+		if err != nil {
+			log.Errorf("Error adding IPv6 endpoint to policy agent{%+v}. Err: %v", endpoint, err)
+			return err
+		}
+	}
+
 	// Save the flow in DB
 	self.macFlowDb[endpoint.MacAddrStr] = macFlow
 
@@ -277,6 +290,15 @@ func (self *Vxlan) RemoveLocalEndpoint(endpoint OfnetEndpoint) error {
 	if err != nil {
 		log.Errorf("Error deleting endpoint to policy agent{%+v}. Err: %v", endpoint, err)
 		return err
+	}
+
+	// Remove IPv6 endpoint from policy tables
+	if endpoint.Ipv6Addr != nil {
+		err = self.policyAgent.DelIpv6Endpoint(&endpoint)
+		if err != nil {
+			log.Errorf("Error deleting IPv6 endpoint from policy agent{%+v}. Err: %v", endpoint, err)
+			return err
+		}
 	}
 
 	return nil
@@ -573,6 +595,15 @@ func (self *Vxlan) AddEndpoint(endpoint *OfnetEndpoint) error {
 		return err
 	}
 
+	// Install dst group entry for IPv6 endpoint
+	if endpoint.Ipv6Addr != nil {
+		err = self.policyAgent.AddIpv6Endpoint(endpoint)
+		if err != nil {
+			log.Errorf("Error adding IPv6 endpoint to policy agent{%+v}. Err: %v", endpoint, err)
+			return err
+		}
+	}
+
 	// Save the flow in DB
 	self.macFlowDb[endpoint.MacAddrStr] = macFlow
 	return nil
@@ -605,6 +636,15 @@ func (self *Vxlan) RemoveEndpoint(endpoint *OfnetEndpoint) error {
 	if err != nil {
 		log.Errorf("Error deleting endpoint to policy agent{%+v}. Err: %v", endpoint, err)
 		return err
+	}
+
+	// Remove the endpoint from policy tables
+	if endpoint.Ipv6Addr != nil {
+		err = self.policyAgent.DelIpv6Endpoint(endpoint)
+		if err != nil {
+			log.Errorf("Error deleting IPv6 endpoint from policy agent{%+v}. Err: %v", endpoint, err)
+			return err
+		}
 	}
 
 	return nil
