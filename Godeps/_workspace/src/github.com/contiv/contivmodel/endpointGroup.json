@@ -37,11 +37,17 @@
 					"ShowSummary": true
 				},
 				"extContractsGrps": {
-                                        "type": "array",
-                                        "items": "string",
-                                        "Title": "External contracts",
-                                        "ShowSummary": true
-                                }
+					"type": "array",
+					"items": "string",
+					"Title": "External contracts",
+					"ShowSummary": true
+				},
+				"netProfile": {
+					"type": "string",
+					"Title": "Network profile name",
+					"Length": 64,
+					"ShowSummary": true
+				}
 			},
 			"link-sets": {
 				"services": {
@@ -50,9 +56,12 @@
 				"policies": {
 					"ref": "policy"
 				},
-                                "extContractsGrps": {
-                                        "ref": "extContractsGrp"
-                                }
+				"rules": {
+					"ref": "rule"
+				},
+				"extContractsGrps": {
+					"ref": "extContractsGrp"
+				}
 			},
 			"links": {
 				"tenant": {
@@ -63,6 +72,9 @@
 				},
 				"appProfile": {
 					"ref": "appProfile"
+				},
+				"netProfile": {
+					"ref": "netProfile"
 				}
 			}
 		}

@@ -20,6 +20,8 @@ import (
 
 const (
 	proxyURL = "http://localhost:5000/"
+	cConsume = "CONSUME"
+	cProvide = "PROVIDE"
 )
 
 // appNwSpec Applications network spec per the composition
@@ -31,20 +33,32 @@ type appNwSpec struct {
 }
 
 type epgSpec struct {
-	Name          string       `json:"name,omitempty"`
-	NwName        string       `json:"nwname,omitempty"`
-	GwCIDR        string       `json:"gwcidr,omitempty"`
-	VlanTag       string       `json:"vlantag,omitempty"`
-	Filters       []filterInfo `json:"filterinfo,omitempty"`
-	Uses          []string     `json:"uses,omitempty"`
-	ProvContracts []string     `json:"provcontracts,omitempty"`
-	ConsContracts []string     `json:"conscontracts,omitempty"`
-	epgID         int          // not exported
+	Name           string      `json:"name,omitempty"`
+	NwName         string      `json:"nwname,omitempty"`
+	GwCIDR         string      `json:"gwcidr,omitempty"`
+	VlanTag        string      `json:"vlantag,omitempty"`
+	ContractDefs   []contrSpec `json:"contractdefs,omitempty"`   // defined by this epg
+	ContractLinks  []contrLink `json:"contractlinks,omitempty"`  // linked to this epg
+	ProvXContracts []string    `json:"provxcontracts,omitempty"` // external to cluster
+	ConsXContracts []string    `json:"consxcontracts,omitempty"` // external to cluster
+	epgID          int         // not exported
 }
 
 type filterInfo struct {
 	Protocol string `json:"protocol,omitempty"`
 	ServPort string `json:"servport,omitempty"`
+}
+
+type contrLink struct {
+	Name string `json:"name,omitempty"`
+	Kind string `json:"kind,omitempty"` // provided or consumed (by this epg)
+}
+
+type contrSpec struct {
+	Name     string       `json:"name,omitempty"`
+	Consumer string       `json:"consumer,omitempty"`
+	Provider string       `json:"provider,omitempty"`
+	Filters  []filterInfo `json:"filterinfo,omitempty"`
 }
 
 type epgMap struct {
@@ -119,8 +133,10 @@ func (ans *appNwSpec) launch() error {
 	}
 
 	if resp.Result != "success" {
-		log.Errorf("Validation failed. Error: %v - %v", resp.Result, resp.Info)
-		return errors.New("Failed")
+		log.Errorf("GW:Validation failed. Error: %v - %v", resp.Result, resp.Info)
+		errStr := fmt.Sprintf("Validation failed. Error: %v - %v",
+			resp.Result, resp.Info)
+		return errors.New(errStr)
 	}
 
 	return nil
@@ -147,6 +163,66 @@ func getGwCIDR(epgObj *contivModel.EndpointGroup, stateDriver core.StateDriver) 
 	gw := nwCfg.Gateway + "/" + strconv.Itoa(int(nwCfg.SubnetLen))
 	log.Debugf("GW is %s for epg %s", gw, epgObj.GroupName)
 	return gw, nil
+}
+
+func getContractName(policy, consumer, provider string) string {
+	if consumer != "" {
+		return policy + "Frm" + consumer
+	}
+	if provider != "" {
+		return policy + "To" + provider
+	}
+
+	return policy + "Expose"
+}
+
+// addPolicyContracts add contracts defined by attached policy
+func addPolicyContracts(epg *epgSpec, policy *contivModel.Policy) error {
+	contractSpecs := make(map[string]*contrSpec)
+
+	for ruleName := range policy.LinkSets.Rules {
+		rule := contivModel.FindRule(ruleName)
+		if rule == nil {
+			errStr := fmt.Sprintf("rule %v not found", ruleName)
+			return errors.New(errStr)
+		}
+
+		if rule.FromIpAddress != "" || rule.FromNetwork != "" ||
+			rule.ToIpAddress != "" || rule.ToNetwork != "" {
+			log.Errorf("rule: %+v is invalid for ACI mode", rule)
+			errStr := fmt.Sprintf("rule %s is invalid, only From/ToEndpointGroup may be specified in ACI mode", ruleName)
+			return errors.New(errStr)
+		}
+
+		if rule.Action == "deny" {
+			log.Debugf("==Ignoring deny rule %v", ruleName)
+			continue
+		}
+
+		filter := filterInfo{Protocol: rule.Protocol, ServPort: strconv.Itoa(rule.Port)}
+		cn := getContractName(policy.PolicyName, rule.FromEndpointGroup,
+			rule.ToEndpointGroup)
+		spec, found := contractSpecs[cn]
+		if !found {
+			prov := rule.ToEndpointGroup
+			if prov == "" {
+				prov = epg.Name
+			}
+
+			spec := &contrSpec{Name: cn,
+				Consumer: rule.FromEndpointGroup,
+				Provider: prov,
+			}
+			contractSpecs[cn] = spec
+		}
+		spec.Filters = append(spec.Filters, filter)
+	}
+
+	for _, cs := range contractSpecs {
+		epg.ContractDefs = append(epg.ContractDefs, *cs)
+	}
+
+	return nil
 }
 
 // Extract relevant info from epg obj and append to application nw spec
@@ -178,7 +254,7 @@ func appendEpgInfo(eMap *epgMap, epgObj *contivModel.EndpointGroup, stateDriver 
 	epg.VlanTag = strconv.Itoa(epgCfg.PktTag)
 	epg.epgID = epgCfg.EndpointGroupID
 
-	// get all the service link details
+	// get all the policy details
 	for _, policy := range epgObj.Policies {
 		log.Debugf("==Processing policy %v", policy)
 		policyKey := epgObj.TenantName + ":" + policy
@@ -188,41 +264,31 @@ func appendEpgInfo(eMap *epgMap, epgObj *contivModel.EndpointGroup, stateDriver 
 			return errors.New(errStr)
 		}
 
-		for ruleName := range pObj.LinkSets.Rules {
-			log.Debugf("==Processing rule %v", ruleName)
-			rule := contivModel.FindRule(ruleName)
-			if rule == nil {
-				errStr := fmt.Sprintf("rule %v not found", ruleName)
-				return errors.New(errStr)
-			}
+		nErr = addPolicyContracts(&epg, pObj)
+		if nErr != nil {
+			return nErr
+		}
+	}
 
-			if rule.Action == "deny" {
-				log.Debugf("==Ignoring deny rule %v", ruleName)
-				continue
-			}
-			singleFilter := filterInfo{Protocol: rule.Protocol, ServPort: strconv.Itoa(rule.Port)}
-			epg.Filters = append(epg.Filters, singleFilter)
-			log.Debugf("Filter information: %v", singleFilter)
-
-			if rule.FromEndpointGroup == "" {
-				log.Debugf("User unspecified %v == exposed contract", ruleName)
-				continue
-			}
-
-			// rule.FromEndpointGroup uses this epg
-			uEpg, ok := eMap.Specs[rule.FromEndpointGroup]
-			if ok {
-				uEpg.Uses = append(uEpg.Uses, epg.Name)
-				eMap.Specs[rule.FromEndpointGroup] = uEpg
-			} else {
-				//not in the map - need to add
-				userEpg := epgSpec{}
-				userEpg.Uses = append(userEpg.Uses, epg.Name)
-				eMap.Specs[rule.FromEndpointGroup] = userEpg
-			}
-			log.Debugf("==Used by %v", rule.FromEndpointGroup)
+	// Add linked contracts based on rules that refer this epg
+	for _, ruleLink := range epgObj.LinkSets.Rules {
+		rule := contivModel.FindRule(ruleLink.ObjKey)
+		if rule == nil {
+			errStr := fmt.Sprintf("Rule %s referring to epg %s not found",
+				ruleLink.ObjKey, epg.Name)
+			return errors.New(errStr)
+		}
+		cn := getContractName(rule.PolicyName, rule.FromEndpointGroup,
+			rule.ToEndpointGroup)
+		kind := ""
+		if rule.FromEndpointGroup != "" {
+			kind = cConsume
+		} else {
+			kind = cProvide
 		}
 
+		cLink := contrLink{Name: cn, Kind: kind}
+		epg.ContractLinks = append(epg.ContractLinks, cLink)
 	}
 
 	// Append external contracts.
@@ -236,9 +302,9 @@ func appendEpgInfo(eMap *epgMap, epgObj *contivModel.EndpointGroup, stateDriver 
 			return errors.New(errStr)
 		}
 		if contractsGrpObj.ContractsType == "consumed" {
-			epg.ConsContracts = append(epg.ConsContracts, contractsGrpObj.Contracts...)
+			epg.ConsXContracts = append(epg.ConsXContracts, contractsGrpObj.Contracts...)
 		} else if contractsGrpObj.ContractsType == "provided" {
-			epg.ProvContracts = append(epg.ProvContracts, contractsGrpObj.Contracts...)
+			epg.ProvXContracts = append(epg.ProvXContracts, contractsGrpObj.Contracts...)
 		} else {
 			// Should not be here.
 			errStr := fmt.Sprintf("Invalid contracts type %v", contractsGrp)
@@ -246,14 +312,9 @@ func appendEpgInfo(eMap *epgMap, epgObj *contivModel.EndpointGroup, stateDriver 
 		}
 	}
 
-	log.Debugf("Copied over %d externally defined consumed contracts", len(epg.ConsContracts))
-	log.Debugf("Copied over %d externally defined provided contracts", len(epg.ProvContracts))
+	log.Debugf("Copied over %d externally defined consumed contracts", len(epg.ConsXContracts))
+	log.Debugf("Copied over %d externally defined provided contracts", len(epg.ProvXContracts))
 
-	// add any saved uses info before overwriting
-	savedEpg, ok := eMap.Specs[epg.Name]
-	if ok {
-		epg.Uses = append(epg.Uses, savedEpg.Uses...)
-	}
 	eMap.Specs[epg.Name] = epg
 	return nil
 }

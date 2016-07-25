@@ -913,7 +913,9 @@ func syncAppProfile(policy *contivModel.Policy) {
 // RuleCreate Creates the rule within a policy
 func (ac *APIController) RuleCreate(rule *contivModel.Rule) error {
 	log.Infof("Received RuleCreate: %+v", rule)
+	var epg *contivModel.EndpointGroup
 
+	epg = nil
 	// verify parameter values
 	if rule.Direction == "in" {
 		if rule.ToNetwork != "" || rule.ToEndpointGroup != "" || rule.ToIpAddress != "" {
@@ -945,7 +947,7 @@ func (ac *APIController) RuleCreate(rule *contivModel.Rule) error {
 		epgKey := rule.TenantName + ":" + rule.FromEndpointGroup
 
 		// find the endpoint group
-		epg := contivModel.FindEndpointGroup(epgKey)
+		epg = contivModel.FindEndpointGroup(epgKey)
 		if epg == nil {
 			log.Errorf("Error finding endpoint group %s", epgKey)
 			return errors.New("endpoint group not found")
@@ -954,7 +956,7 @@ func (ac *APIController) RuleCreate(rule *contivModel.Rule) error {
 		epgKey := rule.TenantName + ":" + rule.ToEndpointGroup
 
 		// find the endpoint group
-		epg := contivModel.FindEndpointGroup(epgKey)
+		epg = contivModel.FindEndpointGroup(epgKey)
 		if epg == nil {
 			log.Errorf("Error finding endpoint group %s", epgKey)
 			return errors.New("endpoint group not found")
@@ -1001,6 +1003,15 @@ func (ac *APIController) RuleCreate(rule *contivModel.Rule) error {
 		return err
 	}
 
+	// link the rule to epg if applicable
+	if epg != nil {
+		modeldb.AddLinkSet(&epg.LinkSets.Rules, rule)
+		err = epg.Write()
+		if err != nil {
+			return nil
+		}
+	}
+
 	// Update any affected app profiles
 	syncAppProfile(policy)
 
@@ -1016,6 +1027,9 @@ func (ac *APIController) RuleUpdate(rule, params *contivModel.Rule) error {
 // RuleDelete deletes the rule within a policy
 func (ac *APIController) RuleDelete(rule *contivModel.Rule) error {
 	log.Infof("Received RuleDelete: %+v", rule)
+	var epg *contivModel.EndpointGroup
+
+	epg = nil
 
 	policyKey := rule.TenantName + ":" + rule.PolicyName
 
@@ -1024,6 +1038,27 @@ func (ac *APIController) RuleDelete(rule *contivModel.Rule) error {
 	if policy == nil {
 		log.Errorf("Error finding policy %s", policyKey)
 		return core.Errorf("Policy not found")
+	}
+
+	// remove any linkage to an epg
+	if rule.FromEndpointGroup != "" {
+		epgKey := rule.TenantName + ":" + rule.FromEndpointGroup
+
+		// find the endpoint group
+		epg = contivModel.FindEndpointGroup(epgKey)
+	} else if rule.ToEndpointGroup != "" {
+		epgKey := rule.TenantName + ":" + rule.ToEndpointGroup
+
+		// find the endpoint group
+		epg = contivModel.FindEndpointGroup(epgKey)
+	}
+
+	if epg != nil {
+		modeldb.RemoveLinkSet(&epg.LinkSets.Rules, rule)
+		err := epg.Write()
+		if err != nil {
+			return err
+		}
 	}
 
 	// unlink the rule from policy
